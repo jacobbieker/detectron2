@@ -87,6 +87,9 @@ def check_image_size(dataset_dict, image):
                     expected_wh,
                 )
             )
+    if "depth" in dataset_dict:
+        if image.shape[2] != dataset_dict["depth"]:
+            raise SizeMismatchError(f"Depth is not {dataset_dict['depth']}, instead is {image.shape[2]} for {dataset_dict['file_name']}")
 
     # To ensure bbox always remap to original image size
     if "width" not in dataset_dict:
