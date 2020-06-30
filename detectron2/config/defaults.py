@@ -101,6 +101,10 @@ _C.DATASETS.PROPOSAL_FILES_TEST = ()
 # Number of top scoring precomputed proposals to keep for test
 _C.DATASETS.PRECOMPUTED_PROPOSAL_TOPK_TEST = 1000
 
+# List of validation datasets for evaluation. Must be registered in DatasetCatalog.
+# Used as the final Test dataset after model training
+_C.DATASETS.VAL = ()
+
 # -----------------------------------------------------------------------------
 # DataLoader
 # -----------------------------------------------------------------------------
@@ -550,6 +554,7 @@ _C.TEST.EXPECTED_RESULTS = []
 # The period (in terms of steps) to evaluate the model during training.
 # Set to 0 to disable.
 _C.TEST.EVAL_PERIOD = 0
+_C.TEST.EXTRA_EVAL = [] # Extra test evals for areas of interest (e.g. beginning of training)
 # The sigmas used to calculate keypoint OKS. See http://cocodataset.org/#keypoints-eval
 # When empty it will use the defaults in COCO.
 # Otherwise it should have the same length as ROI_KEYPOINT_HEAD.NUM_KEYPOINTS.

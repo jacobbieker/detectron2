@@ -55,14 +55,25 @@ def default_argument_parser():
     """
     parser = argparse.ArgumentParser(description="Detectron2 Training")
     parser.add_argument("--config-file", default="", metavar="FILE", help="path to config file")
+    parser.add_argument("--vac-file", default="", metavar="FILE", help="path to value added catalog file")
     parser.add_argument(
         "--resume",
         action="store_true",
         help="whether to attempt to resume from the checkpoint directory",
     )
     parser.add_argument("--eval-only", action="store_true", help="perform evaluation only")
+    parser.add_argument("--multi-bbox", action="store_true", help="whether to use multiple bbox")
+    parser.add_argument("--all-channel", action="store_true", help="whether to use all channels or just radio, W1, i-band")
+    parser.add_argument("--precompute", action="store_true", help="whether to use precomputed proposals")
+    parser.add_argument("--semseg", action="store_true", help="whether to use semantic segmentation")
+    parser.add_argument("--norm", action="store_true", help="whether to use normed values")
     parser.add_argument("--num-gpus", type=int, default=1, help="number of gpus *per machine*")
     parser.add_argument("--num-machines", type=int, default=1)
+    parser.add_argument("--fraction-train", type=float, default=1., help="fraction of training set to use")
+    parser.add_argument("--size-cut", type=float, default=0., help="size (arcseconds) cut")
+    parser.add_argument("--flux-cut", type=float, default=0., help="total flux cut")
+    parser.add_argument("--dataset", type=str, default="", help="path to dataset annotation folder")
+    parser.add_argument("--experiment", type=str, default="", help="experiment name")
     parser.add_argument(
         "--machine-rank", type=int, default=0, help="the rank of this machine (unique per machine)"
     )
@@ -333,7 +344,7 @@ class DefaultTrainer(SimpleTrainer):
 
         # Do evaluation after checkpointer, because then if it fails,
         # we can use the saved checkpoint to debug.
-        ret.append(hooks.EvalHook(cfg.TEST.EVAL_PERIOD, test_and_save_results))
+        ret.append(hooks.EvalHook(cfg.TEST.EVAL_PERIOD, test_and_save_results, cfg.TEST.EXTRA_EVAL))
 
         if comm.is_main_process():
             # run writers in the end, so that evaluation metrics are written
