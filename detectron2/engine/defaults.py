@@ -46,14 +46,30 @@ from .train_loop import SimpleTrainer
 __all__ = ["default_argument_parser", "default_setup", "DefaultPredictor", "DefaultTrainer"]
 
 
-def default_argument_parser():
+def default_argument_parser(epilog=None):
     """
     Create a parser with some common arguments used by detectron2 users.
+
+    Args:
+        epilog (str): epilog passed to ArgumentParser describing the usage.
 
     Returns:
         argparse.ArgumentParser:
     """
-    parser = argparse.ArgumentParser(description="Detectron2 Training")
+    parser = argparse.ArgumentParser(
+        epilog=epilog
+        or f"""
+Examples:
+
+Run on single machine:
+    $ {sys.argv[0]} --num-gpus 8 --config-file cfg.yaml MODEL.WEIGHTS /path/to/weight.pth
+
+Run on multiple machines:
+    (machine0)$ {sys.argv[0]} --machine-rank 0 --num-machines 2 --dist-url <URL> [--other-flags]
+    (machine1)$ {sys.argv[0]} --machine-rank 1 --num-machines 2 --dist-url <URL> [--other-flags]
+""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("--config-file", default="", metavar="FILE", help="path to config file")
     parser.add_argument("--vac-file", default="", metavar="FILE", help="path to value added catalog file")
     parser.add_argument(
@@ -68,12 +84,12 @@ def default_argument_parser():
     parser.add_argument("--semseg", action="store_true", help="whether to use semantic segmentation")
     parser.add_argument("--norm", action="store_true", help="whether to use normed values")
     parser.add_argument("--num-gpus", type=int, default=1, help="number of gpus *per machine*")
-    parser.add_argument("--num-machines", type=int, default=1)
     parser.add_argument("--fraction-train", type=float, default=1., help="fraction of training set to use")
     parser.add_argument("--size-cut", type=float, default=0., help="size (arcseconds) cut")
     parser.add_argument("--flux-cut", type=float, default=0., help="total flux cut")
     parser.add_argument("--dataset", type=str, default="", help="path to dataset annotation folder")
     parser.add_argument("--experiment", type=str, default="", help="experiment name")
+    parser.add_argument("--num-machines", type=int, default=1, help="total number of machines")
     parser.add_argument(
         "--machine-rank", type=int, default=0, help="the rank of this machine (unique per machine)"
     )
@@ -82,7 +98,12 @@ def default_argument_parser():
     # Therefore we use a deterministic way to obtain port,
     # so that users are aware of orphan processes by seeing the port occupied.
     port = 2 ** 15 + 2 ** 14 + hash(os.getuid() if sys.platform != "win32" else 1) % 2 ** 14
-    parser.add_argument("--dist-url", default="tcp://127.0.0.1:{}".format(port))
+    parser.add_argument(
+        "--dist-url",
+        default="tcp://127.0.0.1:{}".format(port),
+        help="initialization URL for pytorch distributed backend. See "
+        "https://pytorch.org/docs/stable/distributed.html for details.",
+    )
     parser.add_argument(
         "opts",
         help="Modify config options using the command-line",
@@ -161,9 +182,7 @@ class DefaultPredictor:
             cfg.DATASETS.TEST.
 
     Examples:
-
-    .. code-block:: python
-
+    ::
         pred = DefaultPredictor(cfg)
         inputs = cv2.imread("input.jpg")
         outputs = pred(inputs)
@@ -178,7 +197,7 @@ class DefaultPredictor:
         checkpointer = DetectionCheckpointer(self.model)
         checkpointer.load(cfg.MODEL.WEIGHTS)
 
-        self.transform_gen = T.ResizeShortestEdge(
+        self.aug = T.ResizeShortestEdge(
             [cfg.INPUT.MIN_SIZE_TEST, cfg.INPUT.MIN_SIZE_TEST], cfg.INPUT.MAX_SIZE_TEST
         )
 
@@ -201,7 +220,7 @@ class DefaultPredictor:
                 # whether the model expects BGR inputs or RGB
                 original_image = original_image[:, :, ::-1]
             height, width = original_image.shape[:2]
-            image = self.transform_gen.get_transform(original_image).apply_image(original_image)
+            image = self.aug.get_transform(original_image).apply_image(original_image)
             image = torch.as_tensor(image.astype("float32").transpose(2, 0, 1))
 
             inputs = {"image": image, "height": height, "width": width}
@@ -211,13 +230,14 @@ class DefaultPredictor:
 
 class DefaultTrainer(SimpleTrainer):
     """
-    A trainer with default training logic. Compared to `SimpleTrainer`, it
-    contains the following logic in addition:
+    A trainer with default training logic.
+    It is a subclass of `SimpleTrainer` which instantiates everything needed from the
+    config. It does the following:
 
     1. Create model, optimizer, scheduler, dataloader from the given config.
     2. Load a checkpoint or `cfg.MODEL.WEIGHTS`, if exists, when
        `resume_or_load` is called.
-    3. Register a few common hooks.
+    3. Register a few common hooks defined by the config.
 
     It is created to simplify the **standard model training workflow** and reduce code boilerplate
     for users who only need the standard training workflow, with standard features.
@@ -239,9 +259,7 @@ class DefaultTrainer(SimpleTrainer):
     To obtain more stable behavior, write your own training logic with other public APIs.
 
     Examples:
-
-    .. code-block:: python
-
+    ::
         trainer = DefaultTrainer(cfg)
         trainer.resume_or_load()  # load last checkpoint or MODEL.WEIGHTS
         trainer.train()
@@ -260,6 +278,7 @@ class DefaultTrainer(SimpleTrainer):
         logger = logging.getLogger("detectron2")
         if not logger.isEnabledFor(logging.INFO):  # setup_logger is not called for d2
             setup_logger()
+        cfg = DefaultTrainer.auto_scale_workers(cfg, comm.get_world_size())
         # Assume these objects must be constructed in this order.
         model = self.build_model(cfg)
         optimizer = self.build_optimizer(cfg, model)
@@ -290,19 +309,20 @@ class DefaultTrainer(SimpleTrainer):
 
     def resume_or_load(self, resume=True):
         """
-        If `resume==True`, and last checkpoint exists, resume from it and load all
-        checkpointables (eg. optimizer and scheduler).
+        If `resume==True`, and last checkpoint exists, resume from it, load all checkpointables
+        (eg. optimizer and scheduler) and update iteration counter.
 
-        Otherwise, load the model specified by the config (skip all checkpointables).
+        Otherwise, load the model specified by the config (skip all checkpointables) and start from
+        the first iteration.
 
         Args:
             resume (bool): whether to do resume or not
         """
         checkpoint = self.checkpointer.resume_or_load(self.cfg.MODEL.WEIGHTS, resume=resume)
-        self.start_iter = checkpoint.get("iteration", -1) if resume else -1
-        # The checkpoint stores the training iteration that just finished, thus we start
-        # at the next iteration (or iter zero if there's no checkpoint).
-        self.start_iter += 1
+        if resume and self.checkpointer.has_checkpoint():
+            self.start_iter = checkpoint.get("iteration", -1) + 1
+            # The checkpoint stores the training iteration that just finished, thus we start
+            # at the next iteration (or iter zero if there's no checkpoint).
 
     def build_hooks(self):
         """
@@ -363,9 +383,7 @@ class DefaultTrainer(SimpleTrainer):
             list[EventWriter]: a list of :class:`EventWriter` objects.
 
         It is now implemented by:
-
-        .. code-block:: python
-
+        ::
             return [
                 CommonMetricPrinter(self.max_iter),
                 JSONWriter(os.path.join(self.cfg.OUTPUT_DIR, "metrics.json")),
@@ -519,3 +537,49 @@ Alternatively, you can call evaluation functions yourself (see Colab balloon tut
         if len(results) == 1:
             results = list(results.values())[0]
         return results
+
+    @staticmethod
+    def auto_scale_workers(cfg, num_workers: int):
+        """
+        When the config is defined for certain number of workers (according to
+        ``cfg.SOLVER.REFERENCE_WORLD_SIZE``) that's different from the number of
+        workers currently in use, returns a new cfg where the total batch size
+        is scaled so that the per-GPU batch size stays the same as the
+        original ``IMS_PER_BATCH // REFERENCE_WORLD_SIZE``.
+
+        Other config options are also scaled accordingly:
+        * training steps and warmup steps are scaled inverse proportionally.
+        * learning rate are scaled proportionally, following :paper:`ImageNet in 1h`.
+
+        It returns the original config if ``cfg.SOLVER.REFERENCE_WORLD_SIZE==0``.
+
+        Returns:
+            CfgNode: a new config
+        """
+        old_world_size = cfg.SOLVER.REFERENCE_WORLD_SIZE
+        if old_world_size == 0 or old_world_size == num_workers:
+            return cfg
+        cfg = cfg.clone()
+        frozen = cfg.is_frozen()
+        cfg.defrost()
+
+        assert (
+            cfg.SOLVER.IMS_PER_BATCH % old_world_size == 0
+        ), "Invalid REFERENCE_WORLD_SIZE in config!"
+        scale = num_workers / old_world_size
+        bs = cfg.SOLVER.IMS_PER_BATCH = int(round(cfg.SOLVER.IMS_PER_BATCH * scale))
+        lr = cfg.SOLVER.BASE_LR = cfg.SOLVER.BASE_LR * scale
+        max_iter = cfg.SOLVER.MAX_ITER = int(round(cfg.SOLVER.MAX_ITER / scale))
+        warmup_iter = cfg.SOLVER.WARMUP_ITERS = int(round(cfg.SOLVER.WARMUP_ITERS / scale))
+        cfg.SOLVER.STEPS = tuple(int(round(s / scale)) for s in cfg.SOLVER.STEPS)
+        cfg.TEST.EVAL_PERIOD = int(round(cfg.TEST.EVAL_PERIOD / scale))
+        cfg.SOLVER.REFERENCE_WORLD_SIZE = num_workers  # maintain invariant
+        logger = logging.getLogger(__name__)
+        logger.info(
+            f"Auto-scaling the config to batch_size={bs}, learning_rate={lr}, "
+            f"max_iter={max_iter}, warmup={warmup_iter}."
+        )
+
+        if frozen:
+            cfg.freeze()
+        return cfg
