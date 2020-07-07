@@ -90,6 +90,8 @@ Run on multiple machines:
     parser.add_argument("--dataset", type=str, default="", help="path to dataset annotation folder")
     parser.add_argument("--experiment", type=str, default="", help="experiment name")
     parser.add_argument("--num-machines", type=int, default=1, help="total number of machines")
+    parser.add_argument("--lr", type=float, default=0.001, help="learning rate")
+    parser.add_argument("--batch", type=int, default=2, help="batch size")
     parser.add_argument(
         "--machine-rank", type=int, default=0, help="the rank of this machine (unique per machine)"
     )
